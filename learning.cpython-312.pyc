@@ -1,0 +1,114 @@
+"""
+geal.engine
+===========
+AffectiveSpace: the vector-based engine that holds and operates on the
+GEAL emotional matrix (a named collection of EmotionVectors in continuous
+Valence-Arousal-Dominance space).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Dict, List, Optional
+
+from .vector import EmotionVector
+
+_DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "data", "baseline_config.json")
+
+
+def _baseline_matrix() -> Dict[str, EmotionVector]:
+    """
+    Literature-informed baseline VAD coordinates for Plutchik's eight
+    primary emotions plus a few common compound/social emotions, in the
+    style of Mehrabian & Russell's PAD affect model.
+    """
+    baseline = [
+        EmotionVector("joy", 0.85, 0.55, 0.45),
+        EmotionVector("trust", 0.60, 0.10, 0.30),
+        EmotionVector("fear", -0.70, 0.65, -0.65),
+        EmotionVector("surprise", 0.15, 0.80, -0.10),
+        EmotionVector("sadness", -0.65, -0.35, -0.40),
+        EmotionVector("disgust", -0.75, 0.25, 0.15),
+        EmotionVector("anger", -0.55, 0.70, 0.35),
+        EmotionVector("anticipation", 0.35, 0.45, 0.20),
+        EmotionVector("love", 0.90, 0.40, 0.20),
+        EmotionVector("guilt", -0.60, 0.30, -0.35),
+        EmotionVector("pride", 0.70, 0.45, 0.65),
+        EmotionVector("shame", -0.70, 0.20, -0.70),
+        EmotionVector("boredom", -0.25, -0.65, -0.15),
+        EmotionVector("serenity", 0.55, -0.55, 0.25),
+    ]
+    return {e.name: e for e in baseline}
+
+
+class AffectiveSpace:
+    """
+    Central engine holding and operating on the GEAL emotional matrix.
+
+    The matrix is a Dict[str, EmotionVector] keyed by lowercase emotion
+    name, seeded from a literature-based baseline and extensible at
+    runtime via LexiconExpansion, MusicMapper, or direct insertion.
+    """
+
+    def __init__(self, seed_baseline: bool = True) -> None:
+        self.matrix: Dict[str, EmotionVector] = _baseline_matrix() if seed_baseline else {}
+
+    # -- mutation ---------------------------------------------------------
+
+    def add(self, vector: EmotionVector) -> None:
+        """Insert or overwrite an emotion in the matrix."""
+        self.matrix[vector.name] = vector
+
+    # -- lookup / inspection ------------------------------------------------
+
+    def get(self, name: str) -> Optional[EmotionVector]:
+        return self.matrix.get(name.strip().lower())
+
+    def nearest(self, vector: EmotionVector, exclude: Optional[str] = None) -> Optional[EmotionVector]:
+        """Find the closest existing emotion to `vector` in VAD space."""
+        candidates = [
+            e for e in self.matrix.values()
+            if exclude is None or e.name != exclude
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda e: e.distance_to(vector))
+
+    def k_nearest(self, vector: EmotionVector, k: int = 3, exclude: Optional[str] = None) -> List[EmotionVector]:
+        """Return the k closest existing emotions to `vector`, sorted nearest-first."""
+        candidates = [
+            e for e in self.matrix.values()
+            if exclude is None or e.name != exclude
+        ]
+        candidates.sort(key=lambda e: e.distance_to(vector))
+        return candidates[:k]
+
+    def all_emotions(self) -> List[str]:
+        return sorted(self.matrix.keys())
+
+    def __len__(self) -> int:
+        return len(self.matrix)
+
+    def __contains__(self, name: str) -> bool:
+        return name.strip().lower() in self.matrix
+
+    # -- persistence --------------------------------------------------------
+
+    def to_json(self, indent: int = 2) -> str:
+        """Serialize the full matrix to a JSON string (config.json-ready)."""
+        payload = {name: vec.to_dict() for name, vec in self.matrix.items()}
+        return json.dumps(payload, indent=indent, sort_keys=True)
+
+    def save(self, path: str) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.to_json())
+
+    @classmethod
+    def load(cls, path: str = _DEFAULT_CONFIG_PATH) -> "AffectiveSpace":
+        space = cls(seed_baseline=False)
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        for name, data in payload.items():
+            space.matrix[name] = EmotionVector.from_dict(data)
+        return space

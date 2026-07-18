@@ -1,0 +1,209 @@
+"""
+geal.crossmodal
+================
+MusicMapper: maps musical features (Key/Modality, Tempo in BPM, Timbre,
+Chord Progressions) into corresponding VAD coordinates, so a piece of
+music can be located in - or matched against - the same AffectiveSpace
+used for text.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+from .engine import AffectiveSpace
+from .vector import EmotionVector, clamp
+
+# Chord qualities that raise perceived tension/activation when present in
+# a progression (used for the arousal contribution below).
+_TENSION_QUALITIES = {"dim", "dim7", "aug", "7", "9", "m7b5"}
+
+# Timbre descriptors and their (valence, arousal, dominance) deltas.
+_TIMBRE_DELTAS = {
+    "bright": (0.20, 0.10, 0.05),
+    "dark": (-0.20, 0.05, 0.10),
+    "warm": (0.15, -0.05, -0.10),
+    "harsh": (-0.20, 0.20, 0.25),
+    "mellow": (0.10, -0.20, -0.15),
+    "metallic": (-0.10, 0.15, 0.15),
+}
+
+
+@dataclass
+class MusicFeatures:
+    """
+    Container for the musical signal fed into MusicMapper.
+
+    Attributes:
+        tempo_bpm: Tempo in beats per minute.
+        mode: Tonal mode, e.g. "major", "minor", "dorian", "phrygian".
+        timbre: A short descriptor from `_TIMBRE_DELTAS`'s keys
+            (e.g. "bright", "dark", "warm", "harsh"); unrecognized
+            descriptors are ignored (contribute nothing).
+        chord_progression: Roman-numeral or lead-sheet-style chord symbols,
+            e.g. ["I", "V", "vi", "IV"] or ["Cmaj7", "Adim7", "G7"].
+            The final chord is checked for tonic resolution, and any
+            chord quality substring listed in `_TENSION_QUALITIES`
+            contributes to arousal.
+        dynamics: Optional loudness marking ("pp", "p", "mp", "mf", "f",
+            "ff"); louder markings push arousal and dominance up.
+    """
+
+    tempo_bpm: float
+    mode: str = "major"
+    timbre: Optional[str] = None
+    chord_progression: List[str] = field(default_factory=list)
+    dynamics: Optional[str] = None
+
+
+_DYNAMICS_SCALE = {"pp": -0.6, "p": -0.35, "mp": -0.1, "mf": 0.1, "f": 0.35, "ff": 0.6}
+
+_TONIC_SYMBOLS = {"i", "I"}  # roman-numeral tonic in either mode-case
+
+
+class MusicMapper:
+    """
+    Crossmodal mapper: converts MusicFeatures into an EmotionVector so
+    music can be placed directly into an AffectiveSpace alongside
+    text-derived emotions.
+    """
+
+    def __init__(self, space: Optional[AffectiveSpace] = None) -> None:
+        # An AffectiveSpace is optional; when supplied, map() can also
+        # resolve the nearest named emotion for a given piece of music.
+        self.space = space
+
+    # -- individual feature -> VAD contributions -----------------------------
+
+    @staticmethod
+    def _tempo_to_arousal(tempo_bpm: float) -> float:
+        """
+        Map tempo (BPM) to arousal.
+
+        Calibration: ~80 BPM (moderate/andante) is treated as the neutral
+        point; every +/-80 BPM around that shifts arousal by a full unit,
+        clamped to [-1, 1]. A 160 BPM allegro therefore reads as maximally
+        aroused, while a 40 BPM largo reads as maximally calm.
+        """
+        return clamp((tempo_bpm - 80.0) / 80.0)
+
+    @staticmethod
+    def _mode_to_valence(mode: str) -> float:
+        """Map tonal mode to a valence bias."""
+        mode = mode.strip().lower()
+        mode_bias = {
+            "major": 0.40,
+            "lydian": 0.45,
+            "mixolydian": 0.20,
+            "dorian": 0.05,
+            "minor": -0.40,
+            "aeolian": -0.35,
+            "phrygian": -0.50,
+            "locrian": -0.55,
+        }
+        return mode_bias.get(mode, 0.0)
+
+    @staticmethod
+    def _timbre_to_deltas(timbre: Optional[str]) -> tuple[float, float, float]:
+        """Map a timbre descriptor to (valence, arousal, dominance) deltas."""
+        if not timbre:
+            return (0.0, 0.0, 0.0)
+        return _TIMBRE_DELTAS.get(timbre.strip().lower(), (0.0, 0.0, 0.0))
+
+    @staticmethod
+    def _progression_to_deltas(chord_progression: List[str]) -> tuple[float, float, float]:
+        """
+        Map a chord progression to (valence, arousal, dominance) deltas.
+
+        Logic:
+            * Ending on a tonic-quality chord (contains "I"/"i" as the
+              root numeral, e.g. "I", "i", "I7") reads as *resolved*:
+              +valence, +dominance (a settled, in-control landing).
+            * Ending elsewhere (e.g. "V", "vi", a suspended or altered
+              chord) reads as *unresolved*: -valence, -dominance.
+            * Any chord symbol containing a tension-quality substring
+              (diminished, augmented, extended 7ths/9ths) nudges arousal
+              up, proportional to how much of the progression is tense.
+        """
+        if not chord_progression:
+            return (0.0, 0.0, 0.0)
+
+        last = chord_progression[-1]
+        resolved = last.strip().startswith(("I", "i")) and not last.strip().startswith(("II", "ii"))
+        valence_delta = 0.15 if resolved else -0.15
+        dominance_delta = 0.15 if resolved else -0.15
+
+        tense_hits = sum(
+            1 for chord in chord_progression
+            if any(q in chord for q in _TENSION_QUALITIES)
+        )
+        arousal_delta = clamp(0.10 * tense_hits, 0.0, 0.5)
+
+        return (valence_delta, arousal_delta, dominance_delta)
+
+    @staticmethod
+    def _dynamics_to_deltas(dynamics: Optional[str]) -> tuple[float, float]:
+        """Map a dynamics marking to (arousal, dominance) deltas."""
+        if not dynamics:
+            return (0.0, 0.0)
+        level = _DYNAMICS_SCALE.get(dynamics.strip().lower(), 0.0)
+        return (level, level * 0.5)
+
+    # -- public API -----------------------------------------------------------
+
+    def map(self, name: str, features: MusicFeatures) -> EmotionVector:
+        """
+        Combine every musical feature into a single VAD coordinate.
+
+        Each sub-mapper contributes an independent delta; contributions are
+        summed and clamped, so the result stays a well-formed point in
+        [-1, 1]^3 regardless of how many features are supplied.
+        """
+        arousal = self._tempo_to_arousal(features.tempo_bpm)
+        valence = self._mode_to_valence(features.mode)
+        dominance = 0.0
+
+        t_v, t_a, t_d = self._timbre_to_deltas(features.timbre)
+        valence += t_v
+        arousal += t_a
+        dominance += t_d
+
+        p_v, p_a, p_d = self._progression_to_deltas(features.chord_progression)
+        valence += p_v
+        arousal += p_a
+        dominance += p_d
+
+        d_a, d_d = self._dynamics_to_deltas(features.dynamics)
+        arousal += d_a
+        dominance += d_d
+
+        vector = EmotionVector(
+            name=name,
+            valence=clamp(valence),
+            arousal=clamp(arousal),
+            dominance=clamp(dominance),
+            source="crossmodal:music",
+            confidence=0.6,
+        )
+
+        if self.space is not None:
+            self.space.add(vector)
+
+        return vector
+
+    def nearest_emotion_label(self, features: MusicFeatures) -> Optional[str]:
+        """
+        Map `features` to VAD space and return the name of the closest
+        emotion already present in `self.space`, without registering the
+        music itself as a new matrix entry.
+
+        Requires an AffectiveSpace to have been supplied at construction.
+        """
+        if self.space is None:
+            raise ValueError("MusicMapper has no AffectiveSpace to search against")
+        # Reuse map()'s combination logic without permanently persisting a probe.
+        combined = self.map("__music_probe__", features)
+        self.space.matrix.pop("__music_probe__", None)  # don't pollute the space
+        neighbor = self.space.nearest(combined)
+        return neighbor.name if neighbor else None

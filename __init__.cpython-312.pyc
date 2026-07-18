@@ -1,0 +1,240 @@
+"""
+geal.learning
+=============
+LexiconExpansion: a dynamic parser capable of taking a dictionary payload
+(colloquial text) or extracting semantic structures from academic text
+(scientific papers / affect-norm literature) to update the VAD matrix
+inside an AffectiveSpace.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Dict, List, Tuple
+
+from .engine import AffectiveSpace
+from .vector import EmotionVector, clamp
+
+# --------------------------------------------------------------------------
+# Lexical scoring resources
+# --------------------------------------------------------------------------
+#
+# Each lexicon maps a keyword (lowercase, matched loosely by substring) to a
+# signed weight on ONE of the three VAD axes. Weights are informed by common
+# affective-norm conventions (cf. Warriner / Bradley & Lang ANEW-style
+# scoring), simplified into hand-curated buckets so the module has zero
+# external dependencies out of the box.
+
+VALENCE_LEXICON: Dict[str, float] = {
+    "love": 0.9, "joy": 0.9, "happy": 0.8, "pleasant": 0.7, "warm": 0.6,
+    "beautiful": 0.7, "comfort": 0.6, "hope": 0.6, "sweet": 0.5, "safe": 0.5,
+    "gentle": 0.4, "peaceful": 0.5, "delight": 0.8, "grateful": 0.7,
+    "longing": 0.2, "bittersweet": 0.1,
+    "hate": -0.9, "pain": -0.8, "sad": -0.7, "fear": -0.7, "afraid": -0.7,
+    "angry": -0.6, "rage": -0.8, "disgust": -0.8, "loss": -0.6, "grief": -0.8,
+    "lonely": -0.6, "hurt": -0.6, "dread": -0.7, "shame": -0.6, "guilt": -0.5,
+    "anxious": -0.5, "empty": -0.5,
+}
+
+AROUSAL_LEXICON: Dict[str, float] = {
+    "excited": 0.8, "panic": 0.9, "rage": 0.9, "thrill": 0.8, "shock": 0.8,
+    "sudden": 0.5, "intense": 0.7, "racing": 0.6, "burst": 0.6, "urgent": 0.6,
+    "alarm": 0.7, "surprise": 0.7, "energetic": 0.6,
+    "calm": -0.7, "quiet": -0.6, "slow": -0.5, "still": -0.6, "tired": -0.5,
+    "drowsy": -0.6, "peaceful": -0.6, "soft": -0.4, "gentle": -0.4,
+    "numb": -0.5, "empty": -0.4, "longing": -0.2, "nostalgic": -0.2,
+}
+
+DOMINANCE_LEXICON: Dict[str, float] = {
+    "control": 0.7, "power": 0.7, "confident": 0.6, "strong": 0.6,
+    "bold": 0.6, "lead": 0.5, "command": 0.6, "proud": 0.5, "assert": 0.5,
+    "helpless": -0.7, "trapped": -0.7, "overwhelmed": -0.6, "weak": -0.5,
+    "small": -0.4, "vulnerable": -0.6, "submit": -0.6, "afraid": -0.4,
+    "dread": -0.4, "panic": -0.5, "shame": -0.5,
+}
+
+_TOKEN_RE = re.compile(r"[a-zA-Z']+")
+
+# Patterns used to pull VAD-relevant numeric statements out of academic
+# text, e.g. "valence = 6.2" (1-9 SAM scale) or "arousal rating of 3.4".
+_PAPER_NUMERIC_RE = re.compile(
+    r"(valence|arousal|dominance)\D{0,15}?([0-9](?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+
+
+def _score_lexicon(tokens: List[str], lexicon: Dict[str, float]) -> Tuple[float, int]:
+    """
+    Score a token list against a keyword->weight lexicon.
+
+    Matching is substring-based (e.g. token "sadness" matches lexicon key
+    "sad") to loosely approximate stemming without an NLP dependency.
+
+    Returns:
+        (average_weight, hit_count). average_weight is 0.0 if no hits.
+    """
+    total = 0.0
+    hits = 0
+    for token in tokens:
+        for key, weight in lexicon.items():
+            if key in token:
+                total += weight
+                hits += 1
+                break  # avoid double counting a token against multiple keys
+    if hits == 0:
+        return 0.0, 0
+    return total / hits, hits
+
+
+def _sam_scale_to_unit(value: float) -> float:
+    """Convert a 1-9 Self-Assessment-Manikin style rating to [-1.0, 1.0]."""
+    return clamp((value - 5.0) / 4.0)
+
+
+class LexiconExpansion:
+    """
+    Learns new emotion entries and writes them into a target AffectiveSpace.
+
+    Two ingestion paths are supported:
+        * teach_from_text()  - colloquial free-text description, scored via
+          weighted keyword lexicons.
+        * teach_from_paper()  - academic text (abstracts, affect-norm
+          tables) that reports explicit V/A/D numeric ratings; these are
+          extracted with a numeric-pattern parser and take precedence over
+          keyword inference where present.
+    """
+
+    def __init__(self, space: AffectiveSpace, regularization_weight: float = 0.25) -> None:
+        self.space = space
+        self.regularization_weight = clamp(regularization_weight, 0.0, 1.0)
+
+    # -- colloquial text ----------------------------------------------------
+
+    def teach_from_text(self, name: str, text_description: str) -> EmotionVector:
+        """
+        Algorithmically derive VAD coordinates for a new (or updated)
+        emotion from a free-text description, and register it in the
+        target AffectiveSpace.
+
+        Algorithm:
+            1. Tokenize the description into lowercase word tokens.
+            2. Independently score the tokens against three keyword
+               lexicons (valence, arousal, dominance) via substring
+               matching, producing a raw VAD estimate and a hit count
+               per axis.
+            3. Confidence is derived from total keyword coverage relative
+               to token count (more recognized affect-words -> higher
+               confidence).
+            4. If the space is non-empty, find the nearest existing
+               neighbor to the raw estimate and pull the result toward it
+               by `regularization_weight` (default 25%). This prevents a
+               handful of sparse keyword hits from producing an
+               ungrounded, noisy point in VAD space, while still letting
+               genuinely novel descriptions move the needle.
+            5. Store and return the resulting EmotionVector.
+        """
+        tokens = [t.lower() for t in _TOKEN_RE.findall(text_description)]
+        if not tokens:
+            raise ValueError("text_description must contain at least one word")
+
+        v_score, v_hits = _score_lexicon(tokens, VALENCE_LEXICON)
+        a_score, a_hits = _score_lexicon(tokens, AROUSAL_LEXICON)
+        d_score, d_hits = _score_lexicon(tokens, DOMINANCE_LEXICON)
+
+        total_hits = v_hits + a_hits + d_hits
+        coverage = min(1.0, total_hits / max(1, len(tokens)))
+        confidence = clamp(0.2 + 0.8 * coverage, 0.0, 1.0)
+
+        raw_vector = EmotionVector(
+            name=name,
+            valence=v_score,
+            arousal=a_score,
+            dominance=d_score,
+            source="learned:text",
+            confidence=confidence,
+        )
+
+        if len(self.space) > 0:
+            neighbor = self.space.nearest(raw_vector, exclude=raw_vector.name)
+            if neighbor is not None:
+                raw_vector = raw_vector.blend(neighbor, self.regularization_weight)
+                raw_vector.source = "learned:text"
+                raw_vector.confidence = confidence
+
+        self.space.add(raw_vector)
+        return raw_vector
+
+    # -- academic / scientific text ------------------------------------------
+
+    def teach_from_paper(self, name: str, paper_excerpt: str) -> EmotionVector:
+        """
+        Extract VAD coordinates from academic text that reports explicit
+        affect ratings, e.g. an abstract or affect-norm table entry such as:
+
+            "...participants rated the target term with a mean valence of
+            7.1, arousal of 6.4, and dominance of 5.8 on a 9-point SAM
+            scale..."
+
+        Extraction logic:
+            1. Regex-scan for `<axis-name> ... <number>` co-occurrences
+               (within a short character window) for each of the three
+               VAD axis names.
+            2. Numbers are assumed to be on a 1-9 Self-Assessment-Manikin
+               scale (the standard in affective-norms literature such as
+               ANEW/NRC-VAD extensions) and are rescaled to [-1.0, 1.0].
+            3. Any axis not found numerically falls back to the keyword
+               lexicon scoring used in teach_from_text(), so partially
+               quantitative excerpts still produce a complete vector.
+            4. The result is regularized toward its nearest neighbor
+               exactly as in teach_from_text(), then stored.
+
+        Returns:
+            The learned EmotionVector, already inserted into self.space.
+        """
+        matches = _PAPER_NUMERIC_RE.findall(paper_excerpt)
+        found: Dict[str, float] = {}
+        for axis, raw_value in matches:
+            axis = axis.lower()
+            if axis not in found:  # first mention wins
+                found[axis] = _sam_scale_to_unit(float(raw_value))
+
+        tokens = [t.lower() for t in _TOKEN_RE.findall(paper_excerpt)]
+
+        if "valence" in found:
+            v_score = found["valence"]
+        else:
+            v_score, _ = _score_lexicon(tokens, VALENCE_LEXICON)
+
+        if "arousal" in found:
+            a_score = found["arousal"]
+        else:
+            a_score, _ = _score_lexicon(tokens, AROUSAL_LEXICON)
+
+        if "dominance" in found:
+            d_score = found["dominance"]
+        else:
+            d_score, _ = _score_lexicon(tokens, DOMINANCE_LEXICON)
+
+        # Explicit numeric ratings are far more trustworthy than keyword
+        # inference, so confidence scales with how many axes were found
+        # numerically in the source text.
+        confidence = clamp(0.4 + 0.2 * len(found), 0.0, 1.0)
+
+        raw_vector = EmotionVector(
+            name=name,
+            valence=v_score,
+            arousal=a_score,
+            dominance=d_score,
+            source="learned:paper",
+            confidence=confidence,
+        )
+
+        if len(self.space) > 0:
+            neighbor = self.space.nearest(raw_vector, exclude=raw_vector.name)
+            if neighbor is not None:
+                raw_vector = raw_vector.blend(neighbor, self.regularization_weight)
+                raw_vector.source = "learned:paper"
+                raw_vector.confidence = confidence
+
+        self.space.add(raw_vector)
+        return raw_vector

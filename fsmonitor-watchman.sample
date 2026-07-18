@@ -1,0 +1,130 @@
+# GEAL — Glacier Emotion Artificial Life
+
+GEAL is an engine that models, maps, and expands an emotional matrix from
+**text**, **music metrics**, and **scientific literature**, using continuous
+[Valence-Arousal-Dominance (VAD)](https://en.wikipedia.org/wiki/PAD_emotional_state_model)
+coordinates as the shared representation across all three modalities.
+
+## Install
+
+```bash
+git clone https://github.com/YOUR_USERNAME/geal.git
+cd geal
+pip install -e .            # runtime only, zero dependencies
+pip install -e ".[dev]"     # + pytest/black/mypy for contributing
+```
+
+Requires Python 3.10+. No third-party runtime dependencies.
+
+## Quickstart
+
+```python
+from geal import AffectiveSpace, LexiconExpansion, MusicMapper, MusicFeatures
+
+# 1. Spin up the matrix (seeded with a literature-based baseline of 14
+#    core/compound emotions).
+space = AffectiveSpace()
+print(space.all_emotions())
+# ['anger', 'anticipation', 'boredom', 'disgust', 'fear', 'guilt', 'joy',
+#  'love', 'pride', 'sadness', 'serenity', 'shame', 'surprise', 'trust']
+
+# 2. Teach it a new emotion from a colloquial description.
+learner = LexiconExpansion(space)
+nostalgia = learner.teach_from_text(
+    "nostalgia",
+    "a warm, quiet ache for a safe place that no longer exists",
+)
+print(nostalgia)  # EmotionVector(name='nostalgia', valence=..., ...)
+
+# 3. Or from an academic excerpt with explicit VAD ratings.
+learner.teach_from_paper(
+    "awe",
+    "Participants rated the term with a mean valence of 7.2, arousal of "
+    "6.1, and dominance of 5.4 on a 9-point SAM scale.",
+)
+
+# 4. Map a piece of music into the same space.
+mapper = MusicMapper(space=space)
+track = mapper.map("my_track", MusicFeatures(
+    tempo_bpm=160,
+    mode="major",
+    timbre="bright",
+    chord_progression=["I", "IV", "V", "I"],
+    dynamics="f",
+))
+print(mapper.nearest_emotion_label(MusicFeatures(tempo_bpm=160, mode="major")))
+# -> closest named emotion to that musical signature, e.g. "joy"
+
+# 5. Persist / version the matrix as JSON (diffable in Git).
+space.save("config.json")
+reloaded = AffectiveSpace.load("config.json")
+```
+
+## Architecture
+
+| Module | Class | Responsibility |
+|---|---|---|
+| `geal.vector` | `EmotionVector` | Immutable-by-convention VAD point + name/source/confidence metadata. Distance, blending, (de)serialization. |
+| `geal.engine` | `AffectiveSpace` | Owns the matrix (`Dict[str, EmotionVector]`), seeded from a Mehrabian/Russell-style baseline. Lookup, k-nearest-neighbor search, JSON persistence. |
+| `geal.learning` | `LexiconExpansion` | Expands the matrix from colloquial text (`teach_from_text`, weighted-keyword scoring) or academic text (`teach_from_paper`, numeric SAM-scale extraction with keyword fallback). New entries are regularized toward their nearest neighbor to avoid noisy, ungrounded points. |
+| `geal.crossmodal` | `MusicMapper` | Maps `MusicFeatures` (tempo, mode, timbre, chord progression, dynamics) into VAD space and can register the result directly into an `AffectiveSpace`. |
+
+All learned/mapped entries carry a `source` tag (`"baseline"`,
+`"learned:text"`, `"learned:paper"`, `"crossmodal:music"`) and a
+`confidence` score, so the provenance of every coordinate in the matrix
+stays auditable.
+
+### Baseline matrix
+
+`geal/data/baseline_config.json` ships the literature-informed baseline
+(Plutchik's eight primary emotions plus common compound/social emotions).
+Regenerate it any time with:
+
+```bash
+python -c "from geal import AffectiveSpace; AffectiveSpace().save('geal/data/baseline_config.json')"
+```
+
+## Testing
+
+```bash
+pytest -v --cov=geal
+```
+
+CI (`.github/workflows/ci.yml`) runs the full suite on Python 3.10–3.12
+for every push and pull request to `main`.
+
+## Repository layout
+
+```
+geal/
+├── geal/
+│   ├── __init__.py          # public API surface
+│   ├── vector.py            # EmotionVector
+│   ├── engine.py            # AffectiveSpace
+│   ├── learning.py          # LexiconExpansion
+│   ├── crossmodal.py        # MusicMapper / MusicFeatures
+│   └── data/
+│       └── baseline_config.json
+├── tests/
+│   ├── test_engine.py
+│   ├── test_learning.py
+│   └── test_crossmodal.py
+├── .github/workflows/ci.yml
+├── pyproject.toml
+├── requirements-dev.txt
+├── LICENSE
+└── README.md
+```
+
+## Roadmap
+
+- Confidence-weighted matrix merging when the same emotion is taught from
+  multiple sources.
+- Richer chord-progression parsing (full Roman-numeral grammar, secondary
+  dominants).
+- Optional embedding-based lexicon scoring (spaCy / sentence-transformers)
+  behind an extras group, keeping the core dependency-free.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

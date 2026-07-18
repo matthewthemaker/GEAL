@@ -1,0 +1,114 @@
+{
+  "anger": {
+    "arousal": 0.7,
+    "confidence": 1.0,
+    "dominance": 0.35,
+    "name": "anger",
+    "source": "baseline",
+    "valence": -0.55
+  },
+  "anticipation": {
+    "arousal": 0.45,
+    "confidence": 1.0,
+    "dominance": 0.2,
+    "name": "anticipation",
+    "source": "baseline",
+    "valence": 0.35
+  },
+  "boredom": {
+    "arousal": -0.65,
+    "confidence": 1.0,
+    "dominance": -0.15,
+    "name": "boredom",
+    "source": "baseline",
+    "valence": -0.25
+  },
+  "disgust": {
+    "arousal": 0.25,
+    "confidence": 1.0,
+    "dominance": 0.15,
+    "name": "disgust",
+    "source": "baseline",
+    "valence": -0.75
+  },
+  "fear": {
+    "arousal": 0.65,
+    "confidence": 1.0,
+    "dominance": -0.65,
+    "name": "fear",
+    "source": "baseline",
+    "valence": -0.7
+  },
+  "guilt": {
+    "arousal": 0.3,
+    "confidence": 1.0,
+    "dominance": -0.35,
+    "name": "guilt",
+    "source": "baseline",
+    "valence": -0.6
+  },
+  "joy": {
+    "arousal": 0.55,
+    "confidence": 1.0,
+    "dominance": 0.45,
+    "name": "joy",
+    "source": "baseline",
+    "valence": 0.85
+  },
+  "love": {
+    "arousal": 0.4,
+    "confidence": 1.0,
+    "dominance": 0.2,
+    "name": "love",
+    "source": "baseline",
+    "valence": 0.9
+  },
+  "pride": {
+    "arousal": 0.45,
+    "confidence": 1.0,
+    "dominance": 0.65,
+    "name": "pride",
+    "source": "baseline",
+    "valence": 0.7
+  },
+  "sadness": {
+    "arousal": -0.35,
+    "confidence": 1.0,
+    "dominance": -0.4,
+    "name": "sadness",
+    "source": "baseline",
+    "valence": -0.65
+  },
+  "serenity": {
+    "arousal": -0.55,
+    "confidence": 1.0,
+    "dominance": 0.25,
+    "name": "serenity",
+    "source": "baseline",
+    "valence": 0.55
+  },
+  "shame": {
+    "arousal": 0.2,
+    "confidence": 1.0,
+    "dominance": -0.7,
+    "name": "shame",
+    "source": "baseline",
+    "valence": -0.7
+  },
+  "surprise": {
+    "arousal": 0.8,
+    "confidence": 1.0,
+    "dominance": -0.1,
+    "name": "surprise",
+    "source": "baseline",
+    "valence": 0.15
+  },
+  "trust": {
+    "arousal": 0.1,
+    "confidence": 1.0,
+    "dominance": 0.3,
+    "name": "trust",
+    "source": "baseline",
+    "valence": 0.6
+  }
+}
